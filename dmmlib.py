@@ -1,10 +1,40 @@
 #!/usr/bin/env python3
 
 import datetime
+import signal
+import contextlib
 import numpy as np
 import pyvisa
 import socket
 import time
+
+
+INVALID_READING_THRESHOLD = 1e30
+
+
+def clean_reading(value):
+    if not np.isfinite(value) or abs(value) >= INVALID_READING_THRESHOLD:
+        return np.nan
+    return value
+
+
+@contextlib.contextmanager
+def graceful_sigint_stop():
+    stop_requested = False
+    previous_handler = signal.getsignal(signal.SIGINT)
+
+    def request_stop(signum, frame):
+        nonlocal stop_requested
+        if stop_requested:
+            raise KeyboardInterrupt
+        stop_requested = True
+        print("\nStopping after current DMM batch...")
+
+    signal.signal(signal.SIGINT, request_stop)
+    try:
+        yield lambda: stop_requested
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
 
 
 class Keysight34465A:
@@ -90,7 +120,14 @@ class Keysight34465A:
         """Trigger and return one reading in the configured function."""
         return float(self.query(':READ?'))
 
-    def stream(self, receiver, sample_rate_hz):
+    def abort(self):
+        """Best-effort abort for cleanup paths."""
+        try:
+            self.write(':ABOR')
+        except Exception as e:
+            print(f"Warning: abort failed: {e}")
+
+    def _stream_until_stopped(self, receiver, sample_rate_hz, should_stop):
         self.write(':TRIG:DELAY 0')
         self.write(':TRIG:COUN INF')
         self.write(':INIT:IMM')
@@ -98,27 +135,41 @@ class Keysight34465A:
         sec_per_sample = self._aperture_from_sample_rate(sample_rate_hz)
         prev = time.time()
         total_samples = 0
-        while True:
-            res = self.query(f':DATA:REMOVE? {sample_rate_hz}, WAIT')
-            t = time.time() - prev
-            prev = time.time()
+        try:
+            while not should_stop():
+                res = self.query(f':DATA:REMOVE? {sample_rate_hz}, WAIT')
+                t = time.time() - prev
+                prev = time.time()
 
-            samples = res.split(',')
-            num_samples = len(samples)
+                samples = res.split(',')
+                num_samples = len(samples)
 
-            times = np.arange(
-                total_samples * sec_per_sample,
-                (num_samples + total_samples) * sec_per_sample,
-                sec_per_sample)
+                times = np.arange(
+                    total_samples * sec_per_sample,
+                    (num_samples + total_samples) * sec_per_sample,
+                    sec_per_sample)
 
-            float_samples = [float(s) for s in samples]
-            receiver.receive(times, float_samples)
-            total_samples += num_samples
+                float_samples = [clean_reading(float(s)) for s in samples]
+                receiver.receive(times, float_samples)
+                total_samples += num_samples
 
-            mean = np.mean(float_samples)
-            print(f"{total_samples} ({total_samples*sec_per_sample:.1f}s) total: got {num_samples} samples in {t:.2f}s; {num_samples/t:.1f}Hz; mean {mean:.6g}")
+                valid_samples = [s for s in float_samples if np.isfinite(s)]
+                invalid_count = num_samples - len(valid_samples)
+                mean = np.mean(valid_samples) if valid_samples else np.nan
+                invalid_msg = f"; {invalid_count} invalid" if invalid_count else ""
+                print(f"{total_samples} ({total_samples*sec_per_sample:.1f}s) total: got {num_samples} samples in {t:.2f}s; {num_samples/t:.1f}Hz; mean {mean:.6g}{invalid_msg}")
+        finally:
+            self.abort()
 
-        self.write(':ABOR')
+    def stream(self, receiver, sample_rate_hz):
+        try:
+            with graceful_sigint_stop() as should_stop:
+                self._stream_until_stopped(receiver, sample_rate_hz, should_stop)
+        except KeyboardInterrupt:
+            print("\nStopped.")
+        else:
+            if should_stop():
+                print("Stopped.")
 
 
 class FileReceiver:
@@ -163,6 +214,8 @@ class PlotJugglerReceiver:
         batch_size = 2  # Account for opening '[' and closing ']'
 
         for t, v in zip(times[::self.stride], values[::self.stride]):
+            if not np.isfinite(v):
+                continue
             record = f'{{"timestamp":{float(t)},"{self.field_name}":{v}}}'
             record_size = len(record) + 1  # +1 for comma separator
 
