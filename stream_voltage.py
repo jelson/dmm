@@ -5,8 +5,8 @@ import dmmlib
 
 parser = argparse.ArgumentParser()
 dmmlib.add_dmm_args(parser)
-parser.add_argument('-r', '--range', type=float, default=10,
-                    help='Voltage range in volts (default: 10)')
+parser.add_argument('-r', '--range', default='10',
+                    help='Voltage range in volts, e.g. 10 or 10V (default: 10)')
 args = parser.parse_args()
 
 receiver = dmmlib.make_receiver(args, field_name='voltage_V')

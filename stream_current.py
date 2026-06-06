@@ -5,8 +5,8 @@ import dmmlib
 
 parser = argparse.ArgumentParser()
 dmmlib.add_dmm_args(parser)
-parser.add_argument('-r', '--range', type=float, default=0.1,
-                    help='Current range in amps (default: 0.1)')
+parser.add_argument('-r', '--range', default='0.1',
+                    help='Current range in amps, e.g. 0.1 or 3A (default: 0.1)')
 args = parser.parse_args()
 
 receiver = dmmlib.make_receiver(args, field_name='current_A')

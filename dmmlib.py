@@ -175,12 +175,16 @@ class Keysight34465A:
 class FileReceiver:
     def __init__(self, filename, field_name):
         self.out = open(filename, "w")
-        self.out.write(f"# start time: {datetime.datetime.now()}\n")
-        self.out.write(f"time,{field_name}\n")
+        self._write(f"# start time: {datetime.datetime.now()}\n")
+        self._write(f"time,{field_name}\n")
+
+    def _write(self, text):
+        self.out.write(text)
+        self.out.flush()
 
     def receive(self, times, values):
         lines = [f"{t:.5f},{v}\n" for t, v in zip(times, values)]
-        self.out.write("".join(lines))
+        self._write("".join(lines))
 
 
 class MultiReceiver:
