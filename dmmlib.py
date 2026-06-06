@@ -12,6 +12,26 @@ import time
 INVALID_READING_THRESHOLD = 1e30
 
 
+class StreamStats:
+    def __init__(self):
+        self.total_samples = 0
+        self.valid_samples = 0
+        self.sum = 0.0
+
+    def add(self, samples):
+        self.total_samples += len(samples)
+        valid_samples = [s for s in samples if np.isfinite(s)]
+        self.valid_samples += len(valid_samples)
+        self.sum += sum(valid_samples)
+        return valid_samples
+
+    @property
+    def average(self):
+        if self.valid_samples == 0:
+            return np.nan
+        return self.sum / self.valid_samples
+
+
 def clean_reading(value):
     if not np.isfinite(value) or abs(value) >= INVALID_READING_THRESHOLD:
         return np.nan
@@ -127,14 +147,13 @@ class Keysight34465A:
         except Exception as e:
             print(f"Warning: abort failed: {e}")
 
-    def _stream_until_stopped(self, receiver, sample_rate_hz, should_stop):
+    def _stream_until_stopped(self, receiver, sample_rate_hz, should_stop, stats):
         self.write(':TRIG:DELAY 0')
         self.write(':TRIG:COUN INF')
         self.write(':INIT:IMM')
 
         sec_per_sample = self._aperture_from_sample_rate(sample_rate_hz)
         prev = time.time()
-        total_samples = 0
         try:
             while not should_stop():
                 res = self.query(f':DATA:REMOVE? {sample_rate_hz}, WAIT')
@@ -145,31 +164,37 @@ class Keysight34465A:
                 num_samples = len(samples)
 
                 times = np.arange(
-                    total_samples * sec_per_sample,
-                    (num_samples + total_samples) * sec_per_sample,
+                    stats.total_samples * sec_per_sample,
+                    (num_samples + stats.total_samples) * sec_per_sample,
                     sec_per_sample)
 
                 float_samples = [clean_reading(float(s)) for s in samples]
                 receiver.receive(times, float_samples)
-                total_samples += num_samples
 
-                valid_samples = [s for s in float_samples if np.isfinite(s)]
-                invalid_count = num_samples - len(valid_samples)
-                mean = np.mean(valid_samples) if valid_samples else np.nan
+                batch_valid_samples = stats.add(float_samples)
+                invalid_count = num_samples - len(batch_valid_samples)
+                batch_average = np.mean(batch_valid_samples) if batch_valid_samples else np.nan
                 invalid_msg = f"; {invalid_count} invalid" if invalid_count else ""
-                print(f"{total_samples} ({total_samples*sec_per_sample:.1f}s) total: got {num_samples} samples in {t:.2f}s; {num_samples/t:.1f}Hz; mean {mean:.6g}{invalid_msg}")
+                print(f"{stats.total_samples} ({stats.total_samples*sec_per_sample:.1f}s) total: got {num_samples} samples in {t:.2f}s; {num_samples/t:.1f}Hz; batch average {batch_average:.6g}, overall average {stats.average:.6g}{invalid_msg}")
         finally:
             self.abort()
 
     def stream(self, receiver, sample_rate_hz):
+        stats = StreamStats()
+
+        def print_summary():
+            print(f"Summary: total samples {stats.total_samples}; overall average {stats.average:.6g}")
+
         try:
             with graceful_sigint_stop() as should_stop:
-                self._stream_until_stopped(receiver, sample_rate_hz, should_stop)
+                self._stream_until_stopped(receiver, sample_rate_hz, should_stop, stats)
         except KeyboardInterrupt:
             print("\nStopped.")
+            print_summary()
         else:
             if should_stop():
                 print("Stopped.")
+                print_summary()
 
 
 class FileReceiver:
